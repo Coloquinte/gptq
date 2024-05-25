@@ -1,3 +1,4 @@
+import os
 import time
 
 import torch
@@ -22,12 +23,15 @@ def get_opt(model):
 
 @torch.no_grad()
 def opt_sequential(model, dataloader, dev):
+    import numpy as np
+
     print('Starting ...')
 
     use_cache = model.config.use_cache
     model.config.use_cache = False
     layers = model.model.decoder.layers
 
+    model = model.to(dtype=torch.float32)
     model.model.decoder.embed_tokens = model.model.decoder.embed_tokens.to(dev) 
     model.model.decoder.embed_positions = model.model.decoder.embed_positions.to(dev)
     if hasattr(model.model.decoder, 'project_out') and model.model.decoder.project_out:
@@ -72,9 +76,13 @@ def opt_sequential(model, dataloader, dev):
     attention_mask = cache['attention_mask']
 
     print('Ready.')
+    net = args.model.split('/')[1]
+    if not os.path.exists(f"../sleekit/data/{net}/"):
+        os.mkdir(f"../sleekit/data/{net}/")
 
     quantizers = {}
     for i in range(len(layers)):
+        print(f"Layer {i}/{len(layers)}")
         layer = layers[i].to(dev)
 
         subset = find_layers(layer)
@@ -93,7 +101,9 @@ def opt_sequential(model, dataloader, dev):
         handles = []
         for name in subset:
             handles.append(subset[name].register_forward_hook(add_batch(name)))
+
         for j in range(args.nsamples):
+            print(f"Run {j}/{args.nsamples}")
             outs[j] = layer(inps[j].unsqueeze(0), attention_mask=attention_mask)[0]
         for h in handles:
             h.remove()
@@ -101,21 +111,27 @@ def opt_sequential(model, dataloader, dev):
         for name in subset:
             print(i, name)
             print('Quantizing ...')
-            gptq[name].fasterquant(
-                percdamp=args.percdamp, groupsize=args.groupsize, actorder=args.act_order, static_groups=args.static_groups
-            )
-            quantizers['model.decoder.layers.%d.%s' % (i, name)] = gptq[name].quantizer
+            print(f"Samples: {gptq[name].nsamples}")
+            if not os.path.exists(f"../sleekit/data/{net}/{i}.{name}/"):
+                os.mkdir(f"../sleekit/data/{net}/{i}.{name}/")
+            np.save(f"../sleekit/data/{net}/{i}.{name}/weight.npy", gptq[name].weight.numpy())
+            np.save(f"../sleekit/data/{net}/{i}.{name}/bias.npy", gptq[name].bias.numpy())
+            np.save(f"../sleekit/data/{net}/{i}.{name}/hessian.npy", gptq[name].H.numpy())
+            np.save(f"../sleekit/data/{net}/{i}.{name}/mean.npy", gptq[name].mean.numpy())
+            #gptq[name].fasterquant(
+            #    percdamp=args.percdamp, groupsize=args.groupsize, actorder=args.act_order, static_groups=args.static_groups
+            #)
+            #quantizers['model.decoder.layers.%d.%s' % (i, name)] = gptq[name].quantizer
             gptq[name].free()
-        for j in range(args.nsamples):
-            outs[j] = layer(inps[j].unsqueeze(0), attention_mask=attention_mask)[0]
 
         layers[i] = layer.cpu()
         del layer
-        del gptq 
+        del gptq
         torch.cuda.empty_cache()
 
         inps, outs = outs, inps
 
+    import sys; sys.exit(0)
     model.config.use_cache = use_cache
     
     return quantizers

@@ -26,6 +26,7 @@ def llama_sequential(model, dataloader, dev):
 
     use_cache = model.config.use_cache
     model.config.use_cache = False
+    model = model.to(dtype=torch.float32)
     layers = model.model.layers
 
     model.model.embed_tokens = model.model.embed_tokens.to(dev)
@@ -66,6 +67,9 @@ def llama_sequential(model, dataloader, dev):
     position_ids = cache['position_ids']
 
     print('Ready.')
+    net = args.model.split('/')[1]
+    if not os.path.exists(f"../sleekit/data/{net}/"):
+        os.mkdir(f"../sleekit/data/{net}/")
 
     quantizers = {}
     for i in range(len(layers)):
@@ -108,14 +112,17 @@ def llama_sequential(model, dataloader, dev):
             for name in subset:
                 print(i, name)
                 print('Quantizing ...')
-                gptq[name].fasterquant(
-                    percdamp=args.percdamp, groupsize=args.groupsize, actorder=args.act_order, static_groups=args.static_groups
-                )
-                quantizers['model.layers.%d.%s' % (i, name)] = gptq[name].quantizer
+                if not os.path.exists(f"../sleekit/data/{net}/{i}.{name}/"):
+                    os.mkdir(f"../sleekit/data/{net}/{i}.{name}/")
+                np.save(f"../sleekit/data/{net}/{i}.{name}/weight.npy", gptq[name].weight.numpy())
+                np.save(f"../sleekit/data/{net}/{i}.{name}/bias.npy", gptq[name].bias.numpy())
+                np.save(f"../sleekit/data/{net}/{i}.{name}/hessian.npy", gptq[name].H.numpy())
+                np.save(f"../sleekit/data/{net}/{i}.{name}/mean.npy", gptq[name].mean.numpy())
+                #gptq[name].fasterquant(
+                #    percdamp=args.percdamp, groupsize=args.groupsize, actorder=args.act_order, static_groups=args.static_groups
+                #)
+                #quantizers['model.layers.%d.%s' % (i, name)] = gptq[name].quantizer
                 gptq[name].free()
-
-        for j in range(args.nsamples):
-            outs[j] = layer(inps[j].unsqueeze(0), attention_mask=attention_mask, position_ids=position_ids)[0]
 
         layers[i] = layer.cpu()
         del layer
@@ -124,6 +131,7 @@ def llama_sequential(model, dataloader, dev):
 
         inps, outs = outs, inps
 
+    import sys; sys.exit(0)
     model.config.use_cache = use_cache
     
     return quantizers

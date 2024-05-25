@@ -23,9 +23,13 @@ class GPTQ:
         if isinstance(self.layer, nn.Conv2d):
             W = W.flatten(1)
         if isinstance(self.layer, transformers.Conv1D):
+            print(f"Type of Conv1D: {type(self.layer).__name__}")
             W = W.t()
+        self.weight = W
+        self.bias = layer.bias
         self.rows = W.shape[0]
         self.columns = W.shape[1]
+        self.mean = torch.zeros(self.columns, device=self.dev)
         self.H = torch.zeros((self.columns, self.columns), device=self.dev)
         self.nsamples = 0
 
@@ -50,12 +54,19 @@ class GPTQ:
             inp = unfold(inp)
             inp = inp.permute([1, 0, 2])
             inp = inp.flatten(1)
+        tmp = inp.shape[1]
+        self.mean *= self.nsamples / (self.nsamples + tmp)
         self.H *= self.nsamples / (self.nsamples + tmp)
         self.nsamples += tmp
-        # inp = inp.float()
-        inp = math.sqrt(2 / self.nsamples) * inp.float()
-        # self.H += 2 / self.nsamples * inp.matmul(inp.t())
+        inp = inp.float()
+        self.mean += inp.sum(dim=1) / self.nsamples
+        inp = math.sqrt(1 / self.nsamples) * inp
         self.H += inp.matmul(inp.t())
+        
+        #self.nsamples += tmp
+        #inp = inp.float()
+        #self.mean += inp.sum(dim=1)
+        #self.H += inp.matmul(inp.t())
 
     def fasterquant(
         self, blocksize=128, percdamp=.01, groupsize=-1, actorder=False, static_groups=False
@@ -148,7 +159,7 @@ class GPTQ:
                 print(torch.sum((self.layer(self.inp1) - self.out1) ** 2))
                 print(torch.sum(Losses))
 
-        torch.cuda.synchronize()
+        #torch.cuda.synchronize()
         print('time %.2f' % (time.time() - tick))
         print('error', torch.sum(Losses).item())
 
@@ -166,6 +177,9 @@ class GPTQ:
             self.inp1 = None
             self.out1 = None
         self.H = None
+        self.mean = None
+        self.weight = None
+        self.bias = None
         self.Losses = None
         self.Trace = None
         torch.cuda.empty_cache()

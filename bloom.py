@@ -9,6 +9,9 @@ from gptq import *
 from modelutils import *
 from quant import *
 
+import numpy as np
+import os
+
 
 def get_bloom(model):
     import torch
@@ -28,6 +31,7 @@ def bloom_sequential(model, dataloader, dev, means=None, stds=None):
 
     use_cache = model.config.use_cache
     model.config.use_cache = False
+    model = model.to(dtype=torch.float32)
     layers = model.transformer.h
 
     model.transformer.word_embeddings = model.transformer.word_embeddings.to(dev)
@@ -68,10 +72,14 @@ def bloom_sequential(model, dataloader, dev, means=None, stds=None):
     alibi = cache['alibi']
 
     print('Ready.')
+    net = args.model.split('/')[1]
+    if not os.path.exists(f"../sleekit/data/{net}/"):
+        os.mkdir(f"../sleekit/data/{net}/")
 
     quantizers = {}
     for i in range(len(layers)):
         layer = layers[i].to(dev)
+        print(f"Layer {i}/{len(layers)}")
 
         subset = find_layers(layer)
         gptq = {}
@@ -90,6 +98,7 @@ def bloom_sequential(model, dataloader, dev, means=None, stds=None):
         for name in subset:
             handles.append(subset[name].register_forward_hook(add_batch(name)))
         for j in range(args.nsamples):
+            print(f"Run {j}/{args.nsamples}")
             outs[j] = layer(inps[j].unsqueeze(0), attention_mask=attention_mask, alibi=alibi)[0]
         for h in handles:
             h.remove()
@@ -97,10 +106,15 @@ def bloom_sequential(model, dataloader, dev, means=None, stds=None):
         for name in subset:
             print(i, name)
             print('Quantizing ...')
-            gptq[name].fasterquant(percdamp=args.percdamp, groupsize=args.groupsize)
-            quantizers['transformer.h.%d.%s' % (i, name)] = gptq[name].quantizer
-        for j in range(args.nsamples):
-            outs[j] = layer(inps[j].unsqueeze(0), attention_mask=attention_mask, alibi=alibi)[0]
+            if not os.path.exists(f"../sleekit/data/{net}/{i}.{name}/"):
+                os.mkdir(f"../sleekit/data/{net}/{i}.{name}/")
+            np.save(f"../sleekit/data/{net}/{i}.{name}/weight.npy", gptq[name].weight.numpy())
+            np.save(f"../sleekit/data/{net}/{i}.{name}/bias.npy", gptq[name].bias.numpy())
+            np.save(f"../sleekit/data/{net}/{i}.{name}/hessian.npy", gptq[name].H.numpy())
+            np.save(f"../sleekit/data/{net}/{i}.{name}/mean.npy", gptq[name].mean.numpy())
+            #gptq[name].fasterquant(percdamp=args.percdamp, groupsize=args.groupsize)
+            #quantizers['transformer.h.%d.%s' % (i, name)] = gptq[name].quantizer
+            gptq[name].free()
 
         layers[i] = layer.cpu()
         del gptq 
@@ -108,6 +122,7 @@ def bloom_sequential(model, dataloader, dev, means=None, stds=None):
 
         inps, outs = outs, inps
 
+    import sys; sys.exit(0)
     model.config.use_cache = use_cache
 
     return quantizers
